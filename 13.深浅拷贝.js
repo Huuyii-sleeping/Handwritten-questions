@@ -47,6 +47,7 @@ function deepCopy(obj, hash = new WeakMap()) {
   hash.set(obj, newObj);
   for (const key in obj) {
     if (obj.hasOwnProperty(key)) {
+      // 这个属性是判断是不是自己的属性（原型链继承的不是自己的属性）
       newObj[key] = deepCopy(obj[key], hash);
     }
   }
