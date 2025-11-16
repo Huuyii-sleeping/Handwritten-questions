@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>大文件断点续传示例</title>
+    <!-- 引入spark-md5计算文件MD5 -->
+    <script src="https://cdn.jsdelivr.net/npm/spark-md5@3.0.2/spark-md5.min.js"></script>
+  </head>
+  <body>
+    <input type="file" id="fileInput" />
+    <button onclick="startUpload()">开始/继续上传</button>
+    <div id="progress">进度：0%</div>
+
+    <script>
+      const fileInput = document.getElementById("fileInput");
+      const progressDiv = document.getElementById("progress");
+      let selectedFile = null; // 选中的文件
+      const CHUNK_SIZE = 2 * 1024 * 1024; // 分片大小：2MB（可调整）
+
+      // 1. 选择文件
+      fileInput.addEventListener("change", (e) => {
+        selectedFile = e.target.files[0];
+        if (!selectedFile) return;
+        console.log(
+          "选中文件：",
+          selectedFile.name,
+          "大小：",
+          (selectedFile.size / 1024 / 1024).toFixed(2) + "MB"
+        );
+      });
+
+      // 2. 计算文件MD5（唯一标识，用于区分不同文件）
+      function calculateFileMD5(file) {
+        return new Promise((resolve) => {
+          const spark = new SparkMD5.ArrayBuffer();
+          const fileReader = new FileReader();
+          const chunkSize = 2 * 1024 * 1024; // 计算MD5时的分片大小
+          let offset = 0;
+
+          // 分步读取文件计算MD5（避免大文件一次性加载内存溢出）
+          function loadNextChunk() {
+            const blob = file.slice(offset, offset + chunkSize);
+            fileReader.readAsArrayBuffer(blob);
+            offset += chunkSize;
+          }
+
+          fileReader.onload = (e) => {
+            spark.append(e.target.result);
+            if (offset < file.size) {
+              loadNextChunk(); // 继续读取下一分片
+            } else {
+              const md5 = spark.end(); // 计算完成
+              resolve(md5);
+            }
+          };
+
+          loadNextChunk(); // 开始读取
+        });
+      }
+
+      // 3. 开始上传（核心逻辑）
+      async function startUpload() {
+        if (!selectedFile) {
+          alert("请先选择文件");
+          return;
+        }
+
+        // 3.1 计算文件MD5（作为唯一标识）
+        const fileMD5 = await calculateFileMD5(selectedFile);
+        console.log("文件MD5：", fileMD5);
+
+        // 3.2 切割文件为分片
+        const chunks = splitFile(selectedFile);
+        console.log("文件分片完成，共", chunks.length, "个分片");
+
+        // 3.3 查询已上传的分片（从服务器和本地缓存获取）
+        const { uploadedChunks } = await queryUploadedChunks(fileMD5);
+        console.log("已上传分片：", uploadedChunks);
+
+        // 3.4 上传未完成的分片
+        await uploadChunks(chunks, uploadedChunks, fileMD5);
+
+        // 3.5 所有分片上传完成，请求合并
+        await mergeChunks(fileMD5, chunks.length, selectedFile.name);
+        alert("文件上传完成！");
+      }
+
+      // 切割文件为分片
+      function splitFile(file) {
+        const chunks = [];
+        let offset = 0;
+        while (offset < file.size) {
+          // 从offset位置切割CHUNK_SIZE大小的分片
+          const chunk = file.slice(offset, offset + CHUNK_SIZE);
+          chunks.push({
+            index: chunks.length, // 分片索引（0开始）
+            blob: chunk, // 分片数据
+          });
+          offset += CHUNK_SIZE;
+        }
+        return chunks;
+      }
+
+      // 查询已上传的分片（向服务器请求 + 本地缓存）
+      async function queryUploadedChunks(fileMD5) {
+        // 先查本地缓存（localStorage）
+        const localProgress = JSON.parse(
+          localStorage.getItem(`upload_${fileMD5}`) || '{"uploadedChunks":[]}'
+        );
+
+        // 再向服务器查询（确保与服务器状态一致）
+        const response = await fetch(
+          `http://localhost:3000/query?fileMD5=${fileMD5}`
+        );
+        const serverProgress = await response.json();
+
+        // 以服务器为准（本地可能过时）
+        return serverProgress;
+      }
+
+      // 上传未完成的分片
+      async function uploadChunks(chunks, uploadedChunks, fileMD5) {
+        // 筛选未上传的分片
+        const needUploadChunks = chunks.filter(
+          (chunk) => !uploadedChunks.includes(chunk.index)
+        );
+        console.log(
+          "需要上传的分片：",
+          needUploadChunks.map((c) => c.index)
+        );
+
+        if (needUploadChunks.length === 0) {
+          console.log("所有分片已上传，无需重复上传");
+          return;
+        }
+
+        // 逐个上传分片（可优化为并发上传，这里简化为串行）
+        let totalUploaded = uploadedChunks.length;
+        const totalChunks = chunks.length;
+
+        for (const chunk of needUploadChunks) {
+          const formData = new FormData();
+          formData.append("fileMD5", fileMD5); // 文件唯一标识
+          formData.append("index", chunk.index); // 分片索引
+          formData.append("chunk", chunk.blob); // 分片数据
+
+          // 上传分片
+          await fetch("http://localhost:3000/upload", {
+            method: "POST",
+            body: formData,
+          });
+
+          // 更新进度（本地缓存 + 页面显示）
+          totalUploaded++;
+          const progress = Math.floor((totalUploaded / totalChunks) * 100);
+          progressDiv.textContent = `进度：${progress}%`;
+          // 保存到localStorage（断电/刷新后可恢复）
+          localStorage.setItem(
+            `upload_${fileMD5}`,
+            JSON.stringify({
+              uploadedChunks: [...uploadedChunks, chunk.index],
+            })
+          );
+          console.log(`分片${chunk.index}上传完成，进度：${progress}%`);
+        }
+      }
+
+      // 请求服务器合并分片
+      async function mergeChunks(fileMD5, totalChunks, fileName) {
+        await fetch("http://localhost:3000/merge", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            fileMD5,
+            totalChunks, // 总分片数（用于校验是否完整）
+            fileName, // 原始文件名（合并后保存的名称）
+          }),
+        });
+        // 合并完成后清除本地缓存
+        localStorage.removeItem(`upload_${fileMD5}`);
+      }
+    </script>
+  </body>
+</html>
