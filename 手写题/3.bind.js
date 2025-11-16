@@ -10,8 +10,8 @@ Function.prototype.myBind = function (context) {
   function Fn() {
     return fn.apply(
       // 处理this的指向
-      // 新的函数fn被当作构造函数（使用new进行调用），this指向fn实例，
-      // 否则指向bind时指定的context
+      // 新的函数fn被当作构造函数（使用new进行调用），this指向新创建的fn实例，
+      // 否则指向bind时指定的context（原来创建的fn实例）
       this instanceof Fn ? this : context,
 
       // 合并参数
